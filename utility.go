@@ -32,12 +32,13 @@ const (
 	// Ranking 0x70.19 — another S2 fest list query, fired at the 8-player match START while a
 	// splatfest is announced/active (seen LIVE: it was the last call before 2306-0103 once
 	// 0x6d.8 ModifyCurrentGameAttribute was handled). Same family as 18/25, and — like them —
-	// the official servers are gone, so an empty list is the best-grounded answer.
-	// NotImplemented here = Core::NotImplemented = 2306-0103.
+	// no real measured can exist (dead official servers, no live fest to proxy), so the
+	// best-grounded answer is an empty list. NotImplemented here = Core::NotImplemented = 2306-0103.
 	methodRankingGetFestivalRanking uint32 = 19
 	// Ranking 0x70.25 GetEventMatchResult -> list. S2 calls it every ~6 min WHILE A
-	// SPLATFEST IS ACTIVE; NotImplemented produced the 2306-0103 comm-error popup. S2's
-	// official servers are gone, so an empty list is the best-grounded answer.
+	// SPLATFEST IS ACTIVE; NotImplemented produced the 2306-0103 comm-error popup. No real
+	// measured can ever exist (S2's official servers are dead, so a live splatfest could
+	// never be proxy-measured), so an empty list is the best-grounded answer.
 	methodRankingGetEventMatchResult uint32 = 25
 
 	// MatchmakeExtension 0x6D.60 CustomGetSimplePlayingSession -> list<SimplePlayingSession>.
@@ -59,8 +60,12 @@ func setupS2Utility(endpoint *nex.Endpoint) {
 		s := conn.Settings
 		switch req.Method {
 		case methodUtilityUpdateCurrentUser:
-			// This method must reply RMC SUCCESS with an EMPTY body; a non-empty body here
-			// breaks the online bring-up. Do not change it to a non-empty response.
+			// reference (proxy measured of a a console S2 online match,
+			// a measurement -> a response = 0 bytes):
+			// Nintendo replies RMC SUCCESS with an EMPTY body. An earlier disassembly RCA
+			// concluded this method returned a ~31-byte struct and had us send 64 zero
+			// bytes; the measured overrode it. Do not "fix" this to a non-empty body on the
+			// strength of a disasm again — measure it.
 			fmt.Printf("[S2 Utility] UpdateCurrentUser pid=%d callID=%d reqLen=%d -> empty success\n",
 				conn.PID, req.CallID, len(req.Body))
 			return nex.NewRMCSuccess(s, ProtocolUtility, req.Method, req.CallID, nil)

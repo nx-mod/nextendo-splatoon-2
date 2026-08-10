@@ -36,7 +36,7 @@ secrets are baked into the source.
 
 ## What this is not
 
-This server ships **no** Nintendo code, keys, captured data, or copyrighted assets. It is an
+This server ships **no** Nintendo code, keys, measured data, or copyrighted assets. It is an
 independent reimplementation for use with a community-run replacement service, not affiliated with,
 endorsed by, or associated with Nintendo. The NEX access key it uses is a well-known per-title value
 derivable from the game itself, not a secret.

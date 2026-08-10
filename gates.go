@@ -1,6 +1,6 @@
 package main
 
-// Online GATES enforced at NEX login — the same access rules for every session:
+// Online GATES enforced at NEX login — the SAME rules as the old the previous stack infra:
 //   - Compte Nextendo OBLIGATOIRE (requireAccount): aucune identité de compte -> refus.
 //   - Online = comptes Nextendo UNIQUEMENT: un NSA de vraie console non lié / un serveur
 //     compte injoignable -> refus (fail-CLOSED : un profil non-Nextendo n'entre jamais).

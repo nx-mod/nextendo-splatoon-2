@@ -4,7 +4,7 @@ package main
 // playing S2 online right now. We report the active PIDs to nextendo-account every 30s;
 // it keeps them ONLINE via its TTL (90s) and serves them back to the Switch's friend list
 // (nx-account) -> the friend shows as "online / playing Splatoon 2". This is the presence
-// source that would otherwise be missing: the Ryujinx fork only posts for the host of a
+// source that would otherwise be missing: the emulator fork only posts for the host of a
 // private match, not for "online" in general.
 
 import (

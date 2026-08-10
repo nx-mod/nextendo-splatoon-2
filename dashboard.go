@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,6 +46,9 @@ type playerInfo struct {
 	Calls      int64
 	LastProto  uint16
 	LastMethod uint32
+	NATMap     uint32 // NAT mapping behaviour (from NATTraversal ReportNATProperties)
+	NATFilter  uint32 // NAT filtering behaviour
+	Ping       uint32 // RTT in ms the client reported (0 = unknown)
 }
 
 type rmcEvent struct {
@@ -52,6 +56,18 @@ type rmcEvent struct {
 	PID    uint64
 	Proto  uint16
 	Method uint32
+}
+
+// ghostIdle : au-delà de cette inactivité RMC, une connexion PRUDP encore ouverte (le client
+// continue d'envoyer des PING) est considérée FANTÔME et n'est plus comptée « en ligne » par
+// le monitoring. Sans ce seuil, un émulateur/une console laissé ouvert pingue pendant des
+// jours et s'affichait « en ligne depuis 100 h ». Même notion de fantôme que la garde « un
+// seul endroit » côté compte (env NEXTENDO_GHOST_IDLE_SECONDS, défaut 15 min).
+func ghostIdle() time.Duration {
+	if n, err := strconv.Atoi(envOr("NEXTENDO_GHOST_IDLE_SECONDS", "")); err == nil && n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return 15 * time.Minute
 }
 
 // noteRMC records an RMC call (fed from endpoint.OnRMC): updates the player, the
@@ -64,13 +80,19 @@ func noteRMC(c *nex.Connection, req *nex.RMCMessage) {
 	atomic.AddInt64(&rmcTotal, 1)
 
 	metaMu.Lock()
+	now := time.Now()
 	pi := playerMeta[pid]
 	if pi == nil {
-		pi = &playerInfo{PID: pid, FirstSeen: time.Now()}
+		pi = &playerInfo{PID: pid, FirstSeen: now}
 		playerMeta[pid] = pi
 		sessionsSeen++
+	} else if !pi.LastSeen.IsZero() && now.Sub(pi.LastSeen) > ghostIdle() {
+		// Le joueur était dormant (aucune action RMC depuis > seuil fantôme) : on repart sur
+		// une NOUVELLE session en ligne. Sans ça, « en ligne depuis » comptait depuis le tout
+		// premier paquet du process (des jours) — d'où des « en ligne depuis 100 h » aberrants.
+		pi.FirstSeen = now
 	}
-	pi.LastSeen = time.Now()
+	pi.LastSeen = now
 	pi.Calls++
 	pi.LastProto = req.Protocol
 	pi.LastMethod = req.Method
@@ -86,6 +108,89 @@ func noteRMC(c *nex.Connection, req *nex.RMCMessage) {
 	}
 	methodCount[rmcName(req.Protocol, req.Method)]++
 	eventsMu.Unlock()
+}
+
+// natTypeLabel turns the NAT mapping+filtering behaviours (ReportNATProperties) into a
+// player-facing type for the dashboard.
+func natTypeLabel(m, f uint32) string {
+	if m == 0 && f == 0 {
+		return ""
+	}
+	if m <= 1 && f <= 1 {
+		return "Ouvert"
+	}
+	if m <= 1 {
+		return "Modéré"
+	}
+	return "Strict"
+}
+
+// noteNAT records a player's NAT behaviour + ping. Wired to endpoint.OnNATProperties so the
+// monitoring site shows NAT type and latency again (lost when the game moved off the previous stack).
+func noteNAT(pid uint64, natMap, natFilter, rtt uint32) {
+	if pid == 0 {
+		return
+	}
+	metaMu.Lock()
+	defer metaMu.Unlock()
+	pi := playerMeta[pid]
+	if pi == nil {
+		pi = &playerInfo{PID: pid, FirstSeen: time.Now()}
+		playerMeta[pid] = pi
+	}
+	pi.NATMap = natMap
+	pi.NATFilter = natFilter
+	if rtt > 0 {
+		pi.Ping = rtt
+	}
+}
+
+// ----- GeoIP (best-effort, cached) ------------------------------------------
+
+var (
+	geoMu     sync.Mutex
+	geoCache  = map[string]geoInfo{}
+	geoClient = &http.Client{Timeout: 4 * time.Second}
+)
+
+type geoInfo struct {
+	Country string `json:"country"`
+	CC      string `json:"countryCode"`
+	City    string `json:"city"`
+	ISP     string `json:"isp"`
+}
+
+func ipOnly(addr string) string {
+	if i := strings.LastIndex(addr, ":"); i > 0 {
+		return addr[:i]
+	}
+	return addr
+}
+
+// geoLookup returns a cached IP geolocation, fetching it once asynchronously (ip-api.com):
+// the first call for an IP returns empty and kicks off the fetch, later calls get the result.
+func geoLookup(addr string) geoInfo {
+	ip := ipOnly(addr)
+	geoMu.Lock()
+	g, ok := geoCache[ip]
+	if !ok {
+		geoCache[ip] = geoInfo{} // placeholder so we only fetch once
+		geoMu.Unlock()
+		go func() {
+			var gi geoInfo
+			resp, err := geoClient.Get("http://ip-api.com/json/" + ip + "?fields=country,countryCode,city,isp")
+			if err == nil {
+				defer resp.Body.Close()
+				_ = json.NewDecoder(resp.Body).Decode(&gi)
+			}
+			geoMu.Lock()
+			geoCache[ip] = gi
+			geoMu.Unlock()
+		}()
+		return geoInfo{}
+	}
+	geoMu.Unlock()
+	return g
 }
 
 // gameModeName maps MK8 online MatchmakeSession game_mode -> a human label.
@@ -155,6 +260,12 @@ type apiPlayer struct {
 	Calls      int64  `json:"calls"`
 	LastAction string `json:"lastAction"`
 	IdleSecs   int    `json:"idleSeconds"`
+	Country    string `json:"country"`
+	CC         string `json:"cc"`
+	City       string `json:"city"`
+	ISP        string `json:"isp"`
+	NatType    string `json:"natType"`
+	Ping       int    `json:"ping"`
 	VR         uint32 `json:"vr"`
 	Mode       string `json:"mode"`
 	IsHost     bool   `json:"isHost"`
@@ -227,16 +338,19 @@ func buildStats(endpoint *nex.Endpoint, mm *nex.Matchmaking) apiStats {
 
 	// Snapshot per-player metadata under the lock.
 	type metaSnap struct {
-		calls       int64
-		first, last time.Time
-		proto       uint16
-		meth        uint32
-		ip          string
+		calls              int64
+		first, last        time.Time
+		proto              uint16
+		meth               uint32
+		ip                 string
+		natMap, natFilter  uint32
+		ping               uint32
 	}
 	metaMu.Lock()
 	snap := make(map[uint64]metaSnap, len(playerMeta))
 	for pid, pi := range playerMeta {
-		snap[pid] = metaSnap{calls: pi.Calls, first: pi.FirstSeen, last: pi.LastSeen, proto: pi.LastProto, meth: pi.LastMethod, ip: pi.IP}
+		snap[pid] = metaSnap{calls: pi.Calls, first: pi.FirstSeen, last: pi.LastSeen, proto: pi.LastProto, meth: pi.LastMethod, ip: pi.IP,
+			natMap: pi.NATMap, natFilter: pi.NATFilter, ping: pi.Ping}
 	}
 	metaMu.Unlock()
 
@@ -286,14 +400,19 @@ func buildStats(endpoint *nex.Endpoint, mm *nex.Matchmaking) apiStats {
 		if pid == 0 || seen[pid] {
 			continue
 		}
-		seen[pid] = true
 		s := snap[pid]
-		online, idle, last := 0, 0, ""
-		if !s.first.IsZero() {
-			online = int(time.Since(s.first).Seconds())
-			idle = int(time.Since(s.last).Seconds())
-			last = rmcName(s.proto, s.meth)
+		// Fantôme : la connexion PRUDP est encore ouverte (le client envoie des PING) mais le
+		// joueur n'a fait AUCUNE action RMC depuis > seuil. Ce sont des émulateurs/consoles
+		// laissés ouverts qui pinguent pendant des jours ; les compter « en ligne » affichait
+		// des « en ligne depuis 100 h » et gonflait le compteur. On les exclut du monitoring
+		// (même notion de fantôme que la garde « un seul endroit », cf online_presence.go).
+		if s.last.IsZero() || time.Since(s.last) > ghostIdle() {
+			continue
 		}
+		seen[pid] = true
+		online := int(time.Since(s.first).Seconds())
+		idle := int(time.Since(s.last).Seconds())
+		last := rmcName(s.proto, s.meth)
 		ip := c.Addr
 		if ip == "" {
 			ip = s.ip
@@ -308,9 +427,12 @@ func buildStats(endpoint *nex.Endpoint, mm *nex.Matchmaking) apiStats {
 		if m := pidMode[pid]; m != 0 {
 			modeLabel = gameModeName(m)
 		}
+		geo := geoLookup(ip)
 		players = append(players, apiPlayer{
 			PID: pid, Name: dispName(pid), IP: ip, State: state, Gathering: gid,
 			OnlineSecs: online, Calls: s.calls, LastAction: last, IdleSecs: idle,
+			Country: geo.Country, CC: geo.CC, City: geo.City, ISP: geo.ISP,
+			NatType: natTypeLabel(s.natMap, s.natFilter), Ping: int(s.ping),
 			VR: pidVR[pid], Mode: modeLabel, IsHost: pidIsHost[pid],
 		})
 	}
@@ -347,7 +469,7 @@ func buildStats(endpoint *nex.Endpoint, mm *nex.Matchmaking) apiStats {
 		Server: apiServer{
 			AccessKey: accessKey, NexVersion: "4.0.0", AuthPort: fmt.Sprintf("%d", authPort),
 			SecurePort: securePort, SNIHost: sniHost, SessionKey: sessionKeyLen,
-			Stack: "nextendo-nex",
+			Stack: "the online stack",
 		},
 		Players:    players,
 		Gatherings: gs,

@@ -1,6 +1,6 @@
 // Command s2 runs the Splatoon 2 online servers (auth + secure) on the Nextendo NEX
-// stack — a from-scratch NEX implementation with no third-party dependencies.
-// It runs the auth and secure servers in one process.
+// stack — our own closed-source NEX implementation, with  the previous stack code.
+// It replaces the previous stack the previous stack / the previous stack pair.
 //
 // Two NEX servers run in one process:
 //   - auth   (:443)   TicketGranting — LoginEx issues the Kerberos ticket. (S2 logs in
@@ -29,8 +29,10 @@ const (
 	accessKey      = "4eb18d39"
 	nexVersion     = 40000
 	securePID      = 2
+	securePassword = "securepasswordplz1"
 	sessionKeyLen  = 32
-	// sniHost is an optional SNI hostname advertised to clients (set via NEXTENDO_HOST).
+	// sniHost is the game server hostname S2 resolves to us; the TLS-passthrough proxy
+	// routes :443 to this process by it.
 	sniHost = ""
 	// s2AppID identifies Splatoon 2 to the account service's presence API.
 	s2AppID = "0100f8f0000a2000"
@@ -40,9 +42,8 @@ var (
 	nextendoHost = envOr("NEXTENDO_HOST", sniHost)
 	authPort     = envOrInt("AUTH_PORT", 443)
 	securePort   = envOrInt("SECURE_PORT", 60004)
-	securePassword = envOr("NEXTENDO_SECURE_PASSWORD", "securepasswordplz1")
-	certFile     = envOr("CERT_FILE", "cert.pem")
-	keyFile      = envOr("KEY_FILE", "key.pem")
+	certFile     = envOr("CERT_FILE", `cert.pem`)
+	keyFile      = envOr("KEY_FILE", `key.pem`)
 
 	// nextendoSecret signs "nx2." NEX login tokens issued by the account service. It MUST
 	// be byte-identical to nextendo-account's secret or token validation fails.
@@ -59,7 +60,8 @@ func main() {
 	// client decides the target is a secure server and therefore hands over its Kerberos
 	// ticket in CONNECT. With "prudp" the handshake completes but CONNECT carries an EMPTY
 	// payload — no ticket, no session key — and the game dies once Pia needs the session
-	// (DataStore reads still work, so menus look fine). The same applies to the SSBU server.
+	// (DataStore reads still work, so menus look fine). This cost days on SSBU; see the
+	// same comment in ssbu/main.go and a measurement
 	secureURL := nex.NewStationURL("prudps")
 	secureURL.Set("address", nextendoHost)
 	secureURL.SetInt("port", securePort)
@@ -86,9 +88,11 @@ func main() {
 	// --- Secure server (:60004) ---
 	// The secure endpoint gets its OWN settings so it can negotiate PRUDP minor version 0
 	// in its SYN-ACK (the supported-functions option encodes minorVersion|supportedFunc<<8),
-	// which is what the retail secure server answered: option=0 where ours replied 5. Scoped
-	// to the secure endpoint on purpose — the auth (:443) is a separate PRUDP server, and
-	// SSBU's auth stopped receiving logins entirely when its minor version was forced to 0.
+	// which is what S2's proven server answers: measured with the client held constant shows
+	// it replying option=0 where ours replied 5. Scoped to the secure endpoint on purpose —
+	// the auth (:443) is a separate PRUDP server, is NOT covered by that measured (it goes
+	// straight to the server), and SSBU's auth stopped receiving logins entirely when its minor
+	// version was forced to 0.
 	secureSettings := nex.NewSwitchSettings(accessKey, nexVersion)
 	secureSettings.PrudpMinorVersion = 0
 	secureEndpoint := nex.NewEndpoint(secureSettings)
@@ -96,8 +100,10 @@ func main() {
 
 	mm := nex.NewMatchmaking()
 	// Splatoon 2 predates Switch Pia 5.19: its proven server answers Register with a public
-	// station of type=0x03 and NO Pa param, where SSBU answers type=0x0B + Pa. That one field
-	// is the difference between the two titles; sending SSBU's shape here breaks S2.
+	// station of type=0x03 and NO Pa param, where SSBU's answers type=0x0B + Pa. Measured by
+	// capturing both servers with the same client (a measurement): identical Register request,
+	// and that one field is the difference. Sending SSBU's shape here diverges from the only
+	// server S2 is known to work against.
 	secureEndpoint.Register(nex.ProtocolSecureConnection, nex.SecureConnectionHandlerWithConfig(nex.LegacyPiaConfig()))
 	secureEndpoint.Register(nex.ProtocolMatchmakeExtension, mm.ExtensionHandler())
 	secureEndpoint.Register(nex.ProtocolMatchMaking, mm.MatchMakingHandler())
@@ -116,6 +122,7 @@ func main() {
 		noteRMC(c, req)         // feed the monitoring dashboard
 		notePresenceSeen(c.PID) // any packet from a PID = that account is playing S2 now
 	}
+	secureEndpoint.OnNATProperties = noteNAT // dashboard: NAT type + ping from ReportNATProperties
 	secureEndpoint.OnConnect = func(c *nex.Connection) {
 		fmt.Printf("[S2 Secure] connected pid=%d id=%d addr=%s\n", c.PID, c.ID, c.RemoteAddr)
 	}
@@ -138,7 +145,7 @@ func main() {
 	// Presence: report active PIDs to the account service so friends see "playing Splatoon 2".
 	startPresenceReporter()
 
-	// When the auth is fronted by a TLS-passthrough proxy (Traefik on the shared :443),
+	// When the auth is fronted by a TLS-passthrough proxy (the reverse proxy on the shared :443),
 	// enable PROXY protocol so the auth sees the console's REAL IP.
 	proxyProto := os.Getenv("NEXTENDO_PROXY_PROTOCOL") == "1"
 	go func() {
@@ -163,7 +170,7 @@ func main() {
 // resolveUser maps a LoginEx username to an account. A valid "nx2." Nextendo token
 // resolves to its persistent PID; anything else gets a stable anonymous PID derived from
 // the username (so the same console keeps the same identity).
-func resolveUser(username string, _ []byte) (uint64, []byte, bool) {
+func resolveUser(username string, extraData []byte) (uint64, []byte, bool) {
 	// The source key encrypts the client ticket and is handed back as pSourceKey, so the
 	// console decrypts it. It MUST be 32 bytes (the Switch kerberos key size).
 	sk := sha256.Sum256([]byte("nextendo-src:" + username))
@@ -184,18 +191,34 @@ func resolveUser(username string, _ []byte) (uint64, []byte, bool) {
 	// identity = the account the game knows itself by (hashing it breaks Pia's
 	// self-recognition → 2618-562 SessionKeepFailed).
 	if n, err := strconv.ParseUint(username, 10, 64); err == nil && n >= 1800000000 {
-		// FAILLE D AUTHENTIFICATION CONNUE. Ce chemin accepte un PID NU comme identite :
-		// aucun jeton, aucune signature. Les PID etant sequentiels depuis 1800000001, il
-		// suffit d envoyer le numero d un autre membre pour jouer sous son identite — et,
-		// via la garde « un seul endroit », l empecher lui-meme de jouer.
-		// On ne peut pas l interdire sechement : l emulateur distribue envoie precisement
-		// ce PID nu. Le refus est donc derriere un interrupteur, a activer quand une build
-		// envoyant le jeton nx2 signe sera deployee. En attendant on journalise chaque usage.
-		if requireSignedToken() {
-			fmt.Printf("[Auth] pid=%d REFUSE : identite par PID nu desactivee (jeton nx2 signe requis)\n", n)
-			return 0, nil, false
+		// Le jeu envoie un PID NU comme identité (aucune signature). Les PID étant
+		// séquentiels depuis 1800000001, envoyer le numéro d'un autre membre suffirait à
+		// jouer sous son identité — et, via la garde « un seul endroit », à l'empêcher
+		// lui-même de jouer. On referme la faille en EXIGEANT la preuve cryptographique
+		// que l'émulateur (>= 1.7.1) glisse dans l'extraData du login : le jeton nx2 signé
+		// (HMAC au secret serveur) porté par le claim "nnex" du id_token BAAS. On valide ce
+		// jeton et on exige qu'il prouve EXACTEMENT le PID annoncé.
+		provenPID, proven := uint64(0), false
+		if tok, ok := nex.NexTokenFromLoginExtraData(extraData); ok {
+			provenPID, proven = nextendoPIDFromToken(tok)
 		}
-		fmt.Printf("[Auth] pid=%d identite par PID NU (non authentifiee — cf. NEXTENDO_REQUIRE_SIGNED_TOKEN)\n", n)
+		// L'enforce ne cible que la plage émulateur (username = le PID du compte lui-même).
+		// Une vraie Switch (NSA >= 1810000000) n'envoie pas de jeton nx2 ; elle reste sur
+		// resolveNSAtoPID pour ne pas casser les consoles CFW légitimes.
+		if n < 1810000000 {
+			switch {
+			case proven && provenPID == n:
+				fmt.Printf("[Auth][bind] pid=%d OK : le nx2 prouve le PID\n", n)
+			case proven && provenPID != n:
+				fmt.Printf("[Auth][bind] pid=%d USURPATION : le nx2 prouve %d, pas %d\n", n, provenPID, n)
+			default:
+				fmt.Printf("[Auth][bind] pid=%d SANS PREUVE : aucun nx2 dans l'extraData (build < 1.7.1 ?)\n", n)
+			}
+			if requireSignedToken() && !(proven && provenPID == n) {
+				fmt.Printf("[Auth] pid=%d REFUSÉ : identité non prouvée (jeton nx2 signé requis)\n", n)
+				return 0, nil, false
+			}
+		}
 		pid, kind := n, "ryujinx"
 		if n >= 1810000000 { // vraie Switch : NSA id -> PID de compte (online = comptes Nextendo UNIQUEMENT)
 			kind = "switch"
@@ -229,6 +252,11 @@ func resolveUser(username string, _ []byte) (uint64, []byte, bool) {
 	return anonymousPID(username), sourceKey, true
 }
 
+// revokedNexPayloads lists leaked nex_token payloads (pid.username.expiry) that must be
+// rejected even though their HMAC is valid, without rotating the shared secret. Populated
+// per deployment.
+var revokedNexPayloads = map[string]bool{
+}
 // nextendoPIDFromToken validates a "nx2.<b64(pid.username.expiry)>.<b64(hmac)>" token
 // signed by the account service (HMAC-SHA256, "nex:" prefix).
 func nextendoPIDFromToken(s string) (uint64, bool) {
@@ -247,6 +275,9 @@ func nextendoPIDFromToken(s string) (uint64, bool) {
 	mac.Write([]byte("nex:" + string(raw)))
 	want := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	if !hmac.Equal([]byte(want), []byte(parts[1])) {
+		return 0, false
+	}
+	if revokedNexPayloads[string(raw)] { // jeton fuité (release 1.6.5-win) — refusé malgré une signature valide
 		return 0, false
 	}
 	f := strings.SplitN(string(raw), ".", 3) // pid.username.expiry

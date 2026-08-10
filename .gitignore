@@ -4,9 +4,9 @@
 *.out
 /bin/
 /dist/
-# Raw / captured binary data — never ship these
+# Raw / measured binary data — never ship these
 *.bin
-captured/
+measured/
 # Secrets & local config — NEVER commit
 .env
 *.pem

@@ -1,6 +1,6 @@
 // Command s2 runs the Splatoon 2 online servers (auth + secure) on the Nextendo NEX
 // stack — our own closed-source NEX implementation, with  the previous stack code.
-// It replaces the previous stack the previous stack / the previous stack pair.
+// It replaces the the previous stack the previous stack / the previous stack pair.
 //
 // Two NEX servers run in one process:
 //   - auth   (:443)   TicketGranting — LoginEx issues the Kerberos ticket. (S2 logs in
@@ -91,7 +91,7 @@ func main() {
 	// which is what S2's proven server answers: measured with the client held constant shows
 	// it replying option=0 where ours replied 5. Scoped to the secure endpoint on purpose —
 	// the auth (:443) is a separate PRUDP server, is NOT covered by that measured (it goes
-	// straight to the server), and SSBU's auth stopped receiving logins entirely when its minor
+	// straight to the VPS), and SSBU's auth stopped receiving logins entirely when its minor
 	// version was forced to 0.
 	secureSettings := nex.NewSwitchSettings(accessKey, nexVersion)
 	secureSettings.PrudpMinorVersion = 0
@@ -101,7 +101,7 @@ func main() {
 	mm := nex.NewMatchmaking()
 	// Splatoon 2 predates Switch Pia 5.19: its proven server answers Register with a public
 	// station of type=0x03 and NO Pa param, where SSBU's answers type=0x0B + Pa. Measured by
-	// capturing both servers with the same client (a measurement): identical Register request,
+	// measuring both servers with the same client (a measurement): identical Register request,
 	// and that one field is the difference. Sending SSBU's shape here diverges from the only
 	// server S2 is known to work against.
 	secureEndpoint.Register(nex.ProtocolSecureConnection, nex.SecureConnectionHandlerWithConfig(nex.LegacyPiaConfig()))
@@ -142,10 +142,16 @@ func main() {
 	// refuser l'accès (« ce compte joue déjà ailleurs ») et les compteurs étaient faux.
 	secureEndpoint.StartReaper()
 	go startDashboard(secureEndpoint, mm)
+
+	// Relais de station. Le port UDP ecoute toujours ; la SUBSTITUTION, elle, est armee par
+	// le fichier interrupteur. Ecouter sans substituer ne coute rien et ne change rien pour
+	// les joueurs, alors que devoir recreer le conteneur pour ouvrir le port les deconnecte
+	// tous — autant que le port soit deja la le jour ou on allume.
+	startRelayWatcher()
 	// Presence: report active PIDs to the account service so friends see "playing Splatoon 2".
 	startPresenceReporter()
 
-	// When the auth is fronted by a TLS-passthrough proxy (the reverse proxy on the shared :443),
+	// When the auth is fronted by a TLS-passthrough proxy (a reverse-proxy on the shared :443),
 	// enable PROXY protocol so the auth sees the console's REAL IP.
 	proxyProto := os.Getenv("NEXTENDO_PROXY_PROTOCOL") == "1"
 	go func() {
@@ -256,6 +262,7 @@ func resolveUser(username string, extraData []byte) (uint64, []byte, bool) {
 // rejected even though their HMAC is valid, without rotating the shared secret. Populated
 // per deployment.
 var revokedNexPayloads = map[string]bool{
+
 }
 // nextendoPIDFromToken validates a "nx2.<b64(pid.username.expiry)>.<b64(hmac)>" token
 // signed by the account service (HMAC-SHA256, "nex:" prefix).
@@ -277,7 +284,7 @@ func nextendoPIDFromToken(s string) (uint64, bool) {
 	if !hmac.Equal([]byte(want), []byte(parts[1])) {
 		return 0, false
 	}
-	if revokedNexPayloads[string(raw)] { // jeton fuité (release 1.6.5-win) — refusé malgré une signature valide
+	if revokedNexPayloads[string(raw)] { // jeton revoque : refuse malgre une signature valide
 		return 0, false
 	}
 	f := strings.SplitN(string(raw), ".", 3) // pid.username.expiry

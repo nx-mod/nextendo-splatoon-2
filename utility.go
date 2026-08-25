@@ -60,8 +60,8 @@ func setupS2Utility(endpoint *nex.Endpoint) {
 		s := conn.Settings
 		switch req.Method {
 		case methodUtilityUpdateCurrentUser:
-			// reference (proxy measured of a a console S2 online match,
-			// a measurement -> a response = 0 bytes):
+			// reference (proxy measured of a real Switch S2 online match,
+			// a measurement -> resp_0x6e_m10.bin = 0 bytes):
 			// Nintendo replies RMC SUCCESS with an EMPTY body. An earlier disassembly RCA
 			// concluded this method returned a ~31-byte struct and had us send 64 zero
 			// bytes; the measured overrode it. Do not "fix" this to a non-empty body on the

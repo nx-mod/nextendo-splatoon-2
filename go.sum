@@ -6,6 +6,8 @@ github.com/NextendoNetwork/nextendo-nex v0.1.7 h1:sE7xBl8qrfurlzxntGNO10tZAT15jb
 github.com/NextendoNetwork/nextendo-nex v0.1.7/go.mod h1:HW1+OvhwLp+lhNtt8ohJOq3156UlJLlJSPcfrhlprj8=
 github.com/NextendoNetwork/nextendo-nex v0.1.8 h1:V1j+87m3WdQRYIWWD3HmGiFE77vlVP7gtikaV9GHtqw=
 github.com/NextendoNetwork/nextendo-nex v0.1.8/go.mod h1:HW1+OvhwLp+lhNtt8ohJOq3156UlJLlJSPcfrhlprj8=
+github.com/NextendoNetwork/nextendo-nex v0.1.9 h1:TMNnXw50tAtlO9EZB1gtim0DRK6XdqDDk7wgQlHWI7Y=
+github.com/NextendoNetwork/nextendo-nex v0.1.9/go.mod h1:HW1+OvhwLp+lhNtt8ohJOq3156UlJLlJSPcfrhlprj8=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=

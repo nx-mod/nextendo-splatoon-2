@@ -240,7 +240,13 @@ func rmcName(proto uint16, method uint32) string {
 	case 0x32:
 		mn = map[uint32]string{0x01: "EndParticipation"}[method]
 	case 0x03:
-		mn = map[uint32]string{2: "InitiateProbe", 3: "RequestProbeInitiationExt", 5: "ReportNATProperties"}[method]
+		// Les methodes 4 et 7 sont le VERDICT du percage — le chiffre autour duquel tourne
+		// tout le travail sur le relais — et elles s affichaient en « m4 » / « m7 ».
+		mn = map[uint32]string{
+			1: "RequestProbeInitiation", 2: "InitiateProbe", 3: "RequestProbeInitiationExt",
+			4: "ReportNATTraversalResult", 5: "ReportNATProperties",
+			6: "GetRelaySignatureKey", 7: "ReportNATTraversalResultDetail",
+		}[method]
 	}
 	if mn == "" {
 		mn = fmt.Sprintf("m%d", method)
@@ -313,6 +319,71 @@ type apiServer struct {
 	Stack      string `json:"stack"`
 }
 
+// apiRelayPair et apiRelay exposent l etat du relais. Sans eux, juger le relais demande de
+// lire le journal a la main sur une fenetre choisie au hasard.
+type apiRelayPair struct {
+	Port       int               `json:"port"`
+	PIDs       []uint64          `json:"pids"`
+	Expected   []string          `json:"expected"`
+	Seen       []string          `json:"seen"`
+	Recus      uint64            `json:"received"`
+	Relayes    uint64            `json:"forwarded"`
+	Rejets     uint64            `json:"rejected"`
+	Remaps     uint64            `json:"remaps"`
+	IdleSec    int               `json:"idleSeconds"`
+	RejectedBy map[string]uint64 `json:"rejectedBy,omitempty"`
+}
+
+type apiRelay struct {
+	Armed        bool           `json:"armed"`
+	Host         string         `json:"host"`
+	PortBase     int            `json:"portBase"`
+	PortSpan     int            `json:"portSpan"`
+	LivePairs    int            `json:"livePairs"`
+	Eligible     int            `json:"eligible"`
+	EligiblePIDs []uint64       `json:"eligiblePids"`
+	Allowed      int            `json:"allowed"`
+	AllowedPIDs  []uint64       `json:"allowedPids"`
+	AllowedAll   bool           `json:"allowedAll"`
+	Candidates   []uint64       `json:"candidates"`
+	PairsOpened  uint64         `json:"pairsOpened"`
+	PairsSilent  uint64         `json:"pairsSilent"`
+	TotalRecus   uint64         `json:"totalReceived"`
+	TotalRelayes uint64         `json:"totalForwarded"`
+	TotalRejets  uint64         `json:"totalRejected"`
+	TotalRemaps  uint64         `json:"totalRemaps"`
+	Pairs        []apiRelayPair `json:"pairs"`
+}
+
+// buildRelay traduit l instantane du coeur. PairsSilent est le chiffre a regarder en
+// premier : une paire fermee sans avoir relaye un seul paquet est une partie qui n a pas eu
+// lieu, et rien d autre ne la signale.
+func buildRelay() apiRelay {
+	st := nex.PairRelayStats()
+	nAutorises, ouvert := nex.RelayVolontairesStats()
+	r := apiRelay{
+		Allowed: nAutorises, AllowedAll: ouvert,
+		Armed: st.Actif, Host: st.Host, PortBase: st.PortBase, PortSpan: st.PortSpan,
+		LivePairs: st.Paires, Eligible: nex.BesoinStats(), EligiblePIDs: nex.BesoinListe(),
+		AllowedPIDs: nex.RelayVolontairesListe(), Candidates: nex.CandidatsRelais(),
+		PairsOpened: st.Total.PairesOuvertes, PairsSilent: st.Total.PairesMuettes,
+		TotalRecus: st.Total.Recus, TotalRelayes: st.Total.Relayes,
+		TotalRejets: st.Total.Rejets, TotalRemaps: st.Total.Remaps,
+		Pairs: make([]apiRelayPair, 0, len(st.Vivantes)),
+	}
+	for _, p := range st.Vivantes {
+		r.Pairs = append(r.Pairs, apiRelayPair{
+			Port: p.Port, PIDs: []uint64{p.PIDs[0], p.PIDs[1]},
+			Expected: []string{p.Attendus[0], p.Attendus[1]},
+			Seen:     []string{p.Places[0], p.Places[1]},
+			Recus:    p.Recus, Relayes: p.Relayes, Rejets: p.Rejets, Remaps: p.Remaps,
+			IdleSec: p.InactifSec, RejectedBy: p.Rejetees,
+		})
+	}
+
+	return r
+}
+
 type apiStats struct {
 	ServerTime     string         `json:"serverTime"`
 	UptimeSeconds  int            `json:"uptimeSeconds"`
@@ -328,6 +399,7 @@ type apiStats struct {
 	Gatherings     []apiGathering `json:"gatherings"`
 	Events         []apiEvent     `json:"events"`
 	Methods        []apiMethod    `json:"methods"`
+	Relay          apiRelay       `json:"relay"`
 }
 
 func dispName(pid uint64) string { return fmt.Sprintf("Joueur-%d", pid%100000) }
@@ -338,13 +410,13 @@ func buildStats(endpoint *nex.Endpoint, mm *nex.Matchmaking) apiStats {
 
 	// Snapshot per-player metadata under the lock.
 	type metaSnap struct {
-		calls              int64
-		first, last        time.Time
-		proto              uint16
-		meth               uint32
-		ip                 string
-		natMap, natFilter  uint32
-		ping               uint32
+		calls             int64
+		first, last       time.Time
+		proto             uint16
+		meth              uint32
+		ip                string
+		natMap, natFilter uint32
+		ping              uint32
 	}
 	metaMu.Lock()
 	snap := make(map[uint64]metaSnap, len(playerMeta))
@@ -475,6 +547,7 @@ func buildStats(endpoint *nex.Endpoint, mm *nex.Matchmaking) apiStats {
 		Gatherings: gs,
 		Events:     ev,
 		Methods:    ms,
+		Relay:      buildRelay(),
 	}
 }
 
@@ -503,6 +576,17 @@ func startDashboard(endpoint *nex.Endpoint, mm *nex.Matchmaking) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(buildStats(endpoint, mm))
+	})
+	// /api/relay — l etat du relais seul. Separe de /api/stats a dessein : pendant un essai
+	// on veut sonder toutes les secondes sans reconstruire la liste des joueurs, des salons
+	// et des evenements a chaque fois, et on veut une URL a donner a une boucle curl.
+	mux.HandleFunc("/api/relay", func(w http.ResponseWriter, r *http.Request) {
+		if !authed(w, r) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(buildRelay())
 	})
 	// /api/kick — libère un compte resté coincé derrière une connexion morte, sans
 	// redémarrer le serveur (ce qui déconnecterait tous les joueurs en partie).

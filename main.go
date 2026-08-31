@@ -148,6 +148,10 @@ func main() {
 	// les joueurs, alors que devoir recreer le conteneur pour ouvrir le port les deconnecte
 	// tous — autant que le port soit deja la le jour ou on allume.
 	startRelayWatcher()
+	// La liste des autorises, relue au meme rythme. Sans elle le relais est ferme a tout le
+	// monde, meme arme : c est deliberement l ordre inverse de l habitude, parce que trois
+	// essais de suite ont touche des joueurs qui n avaient rien demande.
+	startListeWatcher()
 	// Presence: report active PIDs to the account service so friends see "playing Splatoon 2".
 	startPresenceReporter()
 
@@ -261,9 +265,8 @@ func resolveUser(username string, extraData []byte) (uint64, []byte, bool) {
 // revokedNexPayloads lists leaked nex_token payloads (pid.username.expiry) that must be
 // rejected even though their HMAC is valid, without rotating the shared secret. Populated
 // per deployment.
-var revokedNexPayloads = map[string]bool{
+var revokedNexPayloads = map[string]bool{}
 
-}
 // nextendoPIDFromToken validates a "nx2.<b64(pid.username.expiry)>.<b64(hmac)>" token
 // signed by the account service (HMAC-SHA256, "nex:" prefix).
 func nextendoPIDFromToken(s string) (uint64, bool) {

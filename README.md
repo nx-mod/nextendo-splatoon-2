@@ -22,7 +22,7 @@ It is built on the [**nextendo-nex**](https://github.com/NextendoNetwork/nextend
 > **DataStore is a stub.** Splatoon 2 calls a number of DataStore (`0x73`) methods during the
 > online bring-up. This server currently answers them with an empty success so the game proceeds;
 > a full server-side DataStore implementation is not yet part of this tree. As a result, matchmaking
-> is not complete out of the box — the DataStore responses are the remaining piece to implement.
+> is not complete out of the box: the DataStore responses are the remaining piece to implement.
 
 ## Running
 
@@ -31,7 +31,7 @@ cp example.env .env    # then edit .env
 go run .
 ```
 
-Configuration is entirely through environment variables — see [`example.env`](example.env). No
+Configuration is entirely through environment variables: see [`example.env`](example.env). No
 secrets are baked into the source.
 
 ## What this is not
@@ -43,5 +43,5 @@ derivable from the game itself, not a secret.
 
 ## License
 
-Released under the **[PolyForm Shield License 1.0.0](LICENSE.md)** — source-available: read, use,
+Released under the **[PolyForm Shield License 1.0.0](LICENSE.md)**, source-available: read, use,
 modify, and self-host, but do not use it to provide a product that competes with Nextendo Network.
